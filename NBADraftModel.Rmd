@@ -1,0 +1,851 @@
+---
+title: "MOLINAR - A New NBA Draft Prediction Model"
+author: "Nick Kalinowski (Kalidrafts)"
+date: '2022-03-15'
+output:
+  html_document:
+    number_sections: yes
+    toc: yes
+    toc_float: yes
+    code_folding: hide
+#runtime: shiny
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(dplyr)
+library(DT)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(pROC)
+library(randomForest)
+library(plotly)
+library(kableExtra)
+library(rio)
+library(ROCR)
+library(class)
+library(gmodels)
+library(glmnet)
+library(xgboost)
+library(ada)
+library(gbm)
+library(stringr)
+library(shiny)
+```
+
+
+```{r message=FALSE, warning=FALSE, echo = FALSE, out.width="80%", fig.cap="Iverson Molinar", fig.align = 'center'}
+library(magick)
+betting_line <- image_read("https://www.vicksburgpost.com/wp-content/uploads/sites/16/2022/03/031122-BKC-MSU-Tennessee-5-WEB.jpg?w=600")
+betting_line
+```
+
+
+# About the Model
+
+Over the past couple of days, I sought to design and execute a data model which predicted the relative percent chance of a college player being drafted into the National Basketball Association (NBA). Using data science and statistical methods, I was able to create a trained model that correctly predicted whether or not a player would be drafted with about an 86% accuracy rate with sample data. While this model should by no means be treated as a end-all solution to scouting, it can be a useful first step to understand which players' statistical backgrounds and physical attributes best translate to what NBA teams are looking for.
+
+The data taken to train this model came from the entire historical Bart Torvik database, which traces back to 2009. Model development consists of using an ensemble-based approach, centered around using multiple separate xgboost models trained on separate datasets, based on class and position.
+
+Since this model is about the draft, and I initially created it during the 2022 draft cycle, I decided to name it after one of the prospects expected to declare in the 2022 class, Iverson Molinar. MOLINAR stands for Model-adjusted Logistical Indicator Regression, a name I totally did not come up with in the shower. 
+
+Like any model, this one is not without its flaws - as expected, it loves players who produced at a high level in a competitive conference, particularly early on in their careers. However, some of these players, most notably uberproductive "old-school" bigs like Hunter Dickinson or Trayce Jackson-Davis, do not have playstyles which are very well-suited to the modern NBA, so their percentage might be slightly inflated. Likewise, mid-major players, regardless of their production, will always have a slight disadvantage, as the model includes a weighting which boosts those who played a more difficult strength of schedule.
+
+Here is how the model performed on the 2022 and 2023 draft classes. Players in **green** were drafted:
+
+```{r message=FALSE, warning=FALSE, echo = FALSE, out.width="80%", fig.cap="2022 Draft Results", fig.align = 'center'}
+library(magick)
+image2 <- image_read("https://pbs.twimg.com/media/FWJLsEBWAAAGHy6?format=jpg&name=4096x4096")
+image2
+```
+
+```{r message=FALSE, warning=FALSE, echo = FALSE, out.width="80%", fig.cap="2023 Draft Results", fig.align = 'center'}
+library(magick)
+image3 <- image_read("https://pbs.twimg.com/media/FzT7_WoWAAAiEvp?format=jpg&name=medium")
+image3
+```
+
+
+```{r message=FALSE, warning=FALSE, echo = FALSE, out.width="80%", fig.cap="2023 Draft Results", fig.align = 'center'}
+library(magick)
+image4 <- image_read("https://pbs.twimg.com/media/GRHUwRbWwAE1iFC?format=jpg&name=medium")
+image4
+```
+
+## Changes for the 2023 Draft Cycle:
+
+As no data model is ever perfect, and new data comes in every year as each draft cycle restarts, I will be making several tweaks and updates to MOLINAR each year to keep it as current as possible. Here are some of the adjustments I made for the 2023 cycle:
+
+* Replaced the "Power 6" binary variable with a scalar more reflective of strength of schedule. With the previous method, players such as Jalen Duren who performed at a high level in a stronger mid-major (like the American Athletic Conference) were judged at the same level as those who played in the weakest Division 1 conferences. Now, players like Duren or Houston's Jarace Walker should receive a slight boost given that their opponent quality was more difficult.
+
+* Results from the model will now dynamically update as the season progresses. Previously, I downloaded, merged, and read in the csv files from my data sources, which kept the results the same. Now, I am able to directly read them in via their original URLs, which should update as more games are played. **NOTE:** Percentages for many players will be low at the beginning of the season, as the model takes in full-season totals as its inputs. These percentages should continue to increase and/or balance out as more data comes in.
+
+* New features and graphics are on the way...
+
+## Changes for the 2024 Draft Cycle:
+
+
+**International and G-League Players Have Arrived!!!** This past offseason, I have focused on creating a similar metric for international and G-League prospects. The resulting model, **MOLINAR-I**, is not an exact replica of the NCAA model, but is centered around a similar process. MOLINAR-I first weights prospects' statistics based off the strength of their league competition relative to the NCAA, before implementing the same modeling techniques as the original MOLINAR. Since the sources of the data are different for international players as compared to NCAA, the statistics that the model takes into account also differ slightly (e.g. different advanced metrics, age as compared to class).
+
+## Changes for the 2025 Draft Cycle:
+
+Major UI changes have been added to the Shiny App, to provide users with greater insight into the statistical profiles of every college player. Instead of showing one generic table with all of the player's statistics, I decided to group all players into three positional categories, **Guard, Wing,** and **Big**, and calculated their standing in all box score and advanced statistics relative to their peers at their position. The first table consists of a color-coded output of all of these percentile values.
+
+Next, I computed several aggregated grades, in an attempt to observe each player's standing in several important subcategories. These scores include values for **Inside Scoring, Jumpshooting, Playmaking, Rebounding, Defense** and **Advanced Metrics**. All of these scores are graded on a scale from 0 to 100.
+
+The calculation methodology for each score is explained below:
+
+- **Inside Scoring Grade**: Log-weighted score of rim FG% based on the total number of rim attempts. Values were then re-scaled from 0 to 100.
+
+- **Jumpshooting Grade**: Average of the log-weighted score of mid-range FG% based on the total number of mid-range attempts, and the log-weighted score of 3-PT% based on the total number of 3-point attempts. Values were then re-scaled from 0 to 100.
+
+- **Playmaking Grade**: Average of the percentile scores for AST% and AST:TO
+
+- **Rebounding Grade**: Average of the percentile scores for OREB% and DREB%
+
+- **Defense Grade**: Average of the percentile scores for STL%, BLK%, and a few defense-specific advanced metrics (DPORPAG, DBPM, DGBPM, ADRTG)
+
+- **Advanced Metrics Grade**: Average of the percentile scores for PORPAG, BPM, GBPM
+
+Also, I have added predictions for draft range, using a similar xgboost approach:
+
+Players classified as **Lottery** are expected to go within the first 14 picks, **first round** between picks 15 and 25, **late first/early second** between picks 26 and 40, **second round** between picks 41 and 60, and **UDFA** if expected to go undrafted.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+bart_data <- read.csv("https://www.barttorvik.com/getadvstats.php?year=2025&csv=1", header = FALSE)
+
+colnames(bart_data) = c("player_name",	"team",	"conf",	"GP",	"Min_per",	"ORtg",	"usg",	"eFG",	"TS_per",	"ORB_per",	"DRB_per",	"AST_per",	"TO_per",	"FTM",	"FTA",	"FT_per",	"twoPM",	"twoPA",	"twoP_per",	"TPM",	"TPA",	"TP_per",	"blk_per",	"stl_per",	"ftr",	"yr",	"height",	"num",	"porpag",	"adjoe",	"pfr",	"year",	"pid",	"type",	"Rec_Rank",	 "ast_tov",	 "rimmade",	 "totalrimshots",	 "midmade",	 "totalmidshots",	 "rim_make_percent",	 "mid_make_percent",	 "dunksmade",	 "dunkattempts",	 "dunk_make_percentage", "pick",	 "drtg",	"adrtg",	 "dporpag",	 "stops",	 "bpm",	 "obpm",	 "dbpm",	 "gbpm",	"mp",	"ogbpm",	"dgbpm",	"oreb",	"dreb",	"treb",	"ast",	"stl",	"blk",	"pts",	"position",	"no_idea")
+
+bart_data <- bart_data %>%
+  group_by(player_name) %>%
+  mutate(player_name = ifelse(duplicated(player_name) | duplicated(player_name, fromLast = TRUE),
+                               paste(player_name, "(", team, ")", sep = ""), player_name)) %>%
+  ungroup()
+
+bart_data$new_position <- ifelse(bart_data$position %in% c("Pure PG", "Combo G", "Scoring PG"), "Guard",
+                             ifelse(bart_data$position %in% c("Wing G", "Wing F"), "Wing",
+                             ifelse(bart_data$position %in% c("Stretch 4", "PF/C", "C"), "Big", NA)))
+
+bart_data <- bart_data[bart_data$position != "", ]
+
+numeric_columns <- bart_data %>%
+  select(where(is.numeric)) %>%
+  names()
+
+bart_data_percentiles <- bart_data
+
+for (col in numeric_columns) {
+  bart_data_percentiles[[paste0(col, "_percentile")]] <- ntile(bart_data[[col]], 100)
+}
+
+
+
+# Select only relevant columns
+final_df <- bart_data_percentiles %>%
+  select(player_name, new_position, ends_with("_percentile"))
+
+final_df <- final_df %>%
+  rename(position = new_position) %>% select(-GP_percentile)
+
+final_df <- final_df %>%
+  select(-c(
+    "oreb_percentile", "dreb_percentile", "treb_percentile",
+    "ast_percentile", "stl_percentile", "blk_percentile",
+    "pts_percentile", "no_idea_percentile",
+    "pid_percentile", "year_percentile", "pfr_percentile"
+  ))
+
+final_df$drtg_percentile <- 100 - final_df$drtg_percentile
+final_df$adrtg_percentile <- 100 - final_df$adrtg_percentile
+final_df$TO_per_percentile <- 100 - final_df$TO_per_percentile
+
+
+
+#bart_data1 <- bart_data[which(bart_data$year == 2023),]
+
+#bart_data <- bart_data[bart_data$year != "2023", ]
+
+#bart_data <- rbind(bart_data, bart_data1)
+
+#bart_data$yr <- factor(bart_data$yr,labels = c("Fr", "So", "Jr", "Sr"))
+
+new_bart_data <- bart_data[which(bart_data$yr == 'Fr' | bart_data$yr == 'So' | bart_data$yr == 'Jr' | bart_data$yr == 'Sr'),]
+
+new_bart_data$yr <- factor(new_bart_data$yr,labels = c("Fr", "So", "Jr", "Sr"))
+
+#new_bart_data <- new_bart_data[which(new_bart_data$height != '#VALUE!'),]
+
+new_bart_data[is.na(new_bart_data)] = 0
+
+new_bart_data$drafted <- 0
+
+for(i in 1:nrow(new_bart_data)){
+  if(new_bart_data$pick[i] != 0){
+    new_bart_data$drafted[i] = 1
+  }
+  else{
+    new_bart_data$drafted[i] = 0
+  }
+  if(new_bart_data$player_name[i] == "Lajae Jones"){
+    new_bart_data$yr[i] = "Jr"
+  }
+}
+
+drafted_players = new_bart_data[new_bart_data$drafted == 1,]
+undrafted_players = new_bart_data[new_bart_data$drafted == 0,]
+
+drafted_players <- drafted_players %>%
+  group_by(player_name) %>%
+  mutate(drafted = ifelse(year == max(year), 1, 0))
+  
+new_bart_data = rbind(drafted_players, undrafted_players)
+
+
+new_bart_data$p6 <- NA
+new_bart_data$p6 <- 0
+
+for(i in 1:nrow(new_bart_data)){
+  if(new_bart_data$conf[i] == "ACC" | new_bart_data$conf[i] == "P10" | new_bart_data$conf[i] == "SEC" | new_bart_data$conf[i] == "B10" | new_bart_data$conf[i] == "BE" | new_bart_data$conf[i] == "B12"){
+    new_bart_data$p6[i] = 1
+  }
+  #else if(new_bart_data$conf[i] == "Amer" | new_bart_data$conf[i] == "A10" | new_bart_data$team[i] == "Gonzaga" ){
+  #  new_bart_data$p6[i] = 0.6
+  #}
+  else{
+    new_bart_data$p6[i] = 0
+  }
+}
+
+feet <- vector()
+inches <- vector()
+total_height <- vector()
+for(i in 1:nrow(new_bart_data)) { 
+  feet[i] <- as.numeric(word(new_bart_data$height[i],1,sep = "-")) 
+  inches[i] <- as.numeric(word(new_bart_data$height[i],2,sep = "-"))
+  total_height[i] <- (feet[i]*12) + inches[i]
+}
+
+new_bart_data$height <- total_height
+
+new_bart_data$yr <- factor(new_bart_data$yr,labels = c("Fr", "So", "Jr", "Sr"))
+
+new_bart_data$p6 = as.factor(new_bart_data$p6)
+
+new_bart_data[is.na(new_bart_data)] = 0
+
+drops <- c("ht_DELETE","type", "no_idea", "num", "team", "conf", "pick", "position")
+new_bart_data <- new_bart_data[ , !(names(new_bart_data) %in% drops)]
+
+data_with_names <- new_bart_data
+
+important_columns <- c("player_name", 'new_position', "year", "Rec.Rank", "porpag", "stops", "dporpag", "p6", "drafted", "yr", "TS_per", "eFG", "usg", "height", "TP_per", "TPA", "blk_per", "AST_per")
+
+similarity_table <- data_with_names[ , names(data_with_names) %in% important_columns]
+
+
+drops2 <- c("player_name", 'new_position')
+new_bart_data <- new_bart_data[ , !(names(new_bart_data) %in% drops2)]
+
+new_bart_data$drafted = as.factor(new_bart_data$drafted)
+
+bart_subset <- data_with_names[data_with_names$year == "2025", ]
+
+bart_subset <- data_with_names[order(data_with_names$player_name),]
+
+#similarity_2022 <- similarity_table[similarity_table$year == "2023", ]
+
+
+#library(shiny)
+
+library(gsheet)
+withdrawal_data <- gsheet2tbl('https://docs.google.com/spreadsheets/d/1xQbAfozFGsKhuzVUA5bA3OxU0ZlFn8tdrWiW8NuNeHM/edit?gid=194826890#gid=194826890')
+
+drops <- c("Draft","Birth Year", "Listed Height", "Drop_1", "Drop_2", "Drop_3", "Drop_4", "Drop_5", "Drop_6", "Drop_7", "Drop_8")
+
+withdrawal_data = withdrawal_data[complete.cases(withdrawal_data),]
+
+years = withdrawal_data[ , 'Draft']
+withdrawal_data <- withdrawal_data[ , !(names(withdrawal_data) %in% drops)]
+
+oldnames = c("Age In Draft Yr","Height (in)", "FG%", "FT%", "TS%", "eFG%", "ORB%", "DRB%", "TRB%", "AST%", "TOV%", "STL%", "BLK%", "USG%", "Total S")
+newnames = c("Age.In.Draft.Yr","Height..in.", "FG.", "FT.", "TS.", "eFG.", "ORB.", "DRB.", "TRB.", "AST.", "TOV.", "STL.", "BLK.", "USG.", "Total.S")
+
+withdrawal_data <- withdrawal_data %>% rename_at(vars(oldnames), ~ newnames)
+
+
+columns_to_multiply <- c("PTS", "FGM", "FGA", "ThreePtMade", "ThreePtAttempts", "FTM", "FTA", "OFF", "DEF", "TRB", "AST", "STL", "BLK", "TOV")
+
+withdrawal_data = withdrawal_data[order(withdrawal_data$Player), ]
+
+# Multiply selected columns based on the "League" column
+# Define a lookup table for league conversion factors
+conversion_factors <- c(
+  "France" = 0.7, "France-1" = 0.7, "ABA" = 0.9, "Euroleague" = 1.5, 
+  "Spain" = 1.3, "Spain-3" = 0.1, "Turkey" = 0.8, "Brazil" = 0.3, 
+  "NBL" = 0.8, "Greece" = 0.4, "Germany" = 0.7, "France-2" = 0.2, 
+  "Israel" = 0.5, "Lithuania" = 0.4, "Ukraine" = 0.2, "Serbia" = 0.1, 
+  "France-3" = 0.05, "Argentina" = 0.2, "Poland" = 0.2, "Latvia" = 0.1, 
+  "Belgium" = 0.6, "NZNBL" = 0.1, "Italy-2" = 0.08, "Croatia" = 0.1, 
+  "Denmark" = 0.1, "Spain-2" = 0.3, "China" = 0.4, "Italy" = 1.1, 
+  "Russia" = 1.1, "G-League" = 1, "Japan" = 0.1
+)
+
+
+# Apply conversion factors based on the league
+result_withdrawal <- withdrawal_data %>%
+  mutate(
+    across(all_of(columns_to_multiply), ~ . * conversion_factors[League])
+  )
+
+intl_players <- result_withdrawal
+
+drops2 <- c("Player", "League")
+result_withdrawal <- result_withdrawal[, !(names(result_withdrawal) %in% drops2)]
+
+categorical_cols <- sapply(result_withdrawal, is.factor)
+
+if (any(categorical_cols)) {
+  dummies <- dummyVars(" ~ .", data = result_withdrawal[, categorical_cols, drop = FALSE])
+  sparse_matrix <- predict(dummies, newdata = result_withdrawal)
+  result_withdrawal <- cbind(result_withdrawal[, !categorical_cols, drop = FALSE], sparse_matrix)
+}
+
+result_withdrawal[] <- lapply(result_withdrawal, function(x) if (is.logical(x)) as.numeric(x) else x)
+
+result_withdrawal$Drafted = 0
+
+if ("Drafted" %in% names(result_withdrawal)) {
+  dintl <- xgb.DMatrix(data = as.matrix(result_withdrawal[, -which(names(result_withdrawal) == "Drafted")]), label = result_withdrawal$Drafted)
+} else {
+  stop("The 'drafted' column is missing from result_withdrawal.")
+}
+
+
+
+
+githubURL <- "https://raw.githubusercontent.com/nkal22/combine_score/main/international_molinarXGB.RData"
+
+suppressWarnings({
+  download.file(githubURL, "localfile.RData")
+  load(url(githubURL))
+})
+intl_predictions <- predict(xgb_model_int, dintl)
+
+linebreaks <- function(n){HTML(strrep(br(), n))}
+
+
+intl_players$predicted = abs(intl_predictions * 100)
+
+ui <- fluidPage(
+  tags$style(type = "text/css",
+              ".shiny-output-error { visibility: hidden; }",
+              ".shiny-output-error:before { visibility: hidden; }",
+              ".shiny-panel { width: 100%; height: 600px; overflow: auto; }"  # Set your desired width and height
+  ),
+  
+  tabsetPanel(
+    tabPanel("NCAA Players",
+             selectInput("Player", "Choose NCAA Player", choices = c(bart_subset$player_name)),
+             htmlOutput("statsText"),
+             DTOutput("percentilesTable"),
+             htmlOutput("gradesText"),
+             DTOutput("attributeScoresTable"),
+             htmlOutput("finalScore"),
+             htmlOutput("b"),
+             htmlOutput("range"),
+             linebreaks(3)
+    ),
+    tabPanel("International/G-League Players",
+             selectInput("international_player", "Choose International/G-League Player", choices = c(intl_players$Player)),
+             tableOutput("table3"),
+             htmlOutput("d")
+    )
+  )
+)
+
+bart_subset$p6 <- as.numeric(as.character(bart_subset$p6))
+
+names(bart_subset)[names(bart_subset) == "Rec.Rank"] <- "Rec_Rank"
+
+bart_frosh = bart_subset[bart_subset$yr == "Fr", ]
+bart_soph = bart_subset[bart_subset$yr == "So", ]
+bart_upperclass = bart_subset[(bart_subset$yr != "Fr") & (bart_subset$yr != "So"), ]
+
+frosh_player_names = bart_frosh$player_name
+soph_player_names = bart_soph$player_name
+upperclass_player_names = bart_upperclass$player_name
+
+drops <- c("player_name", 'new_position', "year", "pid", "drafted", "predicted")
+bart_2024 <- bart_subset[ , !(names(bart_subset) %in% drops)]
+bart_frosh_2024 <- bart_frosh[ , !(names(bart_frosh) %in% drops)]
+bart_soph_2024 <- bart_soph[ , !(names(bart_soph) %in% drops)]
+bart_upperclass_2024 <- bart_upperclass[ , !(names(bart_upperclass) %in% drops)]
+
+
+# FRESHMEN
+categorical_cols <- sapply(bart_frosh_2024, is.factor)
+if (any(categorical_cols)) {
+  dummies <- dummyVars(" ~ .", data = bart_frosh_2024[, categorical_cols])
+  sparse_matrix_frosh_2024 <- cbind(bart_frosh_2024[, !categorical_cols, drop = FALSE], predict(dummies, newdata = bart_frosh_2024))
+}
+
+
+sparse_matrix_frosh_2024$drafted = 0
+
+dfrosh2024 <- xgb.DMatrix(as.matrix(sparse_matrix_frosh_2024[, -which(names(sparse_matrix_frosh_2024) == "drafted")]), label = sparse_matrix_frosh_2024$drafted)
+
+#SOPHOMORES
+categorical_cols <- sapply(bart_soph_2024, is.factor)
+if (any(categorical_cols)) {
+  dummies <- dummyVars(" ~ .", data = bart_soph_2024[, categorical_cols])
+  sparse_matrix_soph_2024 <- cbind(bart_soph_2024[, !categorical_cols, drop = FALSE], predict(dummies, newdata = bart_soph_2024))
+}
+
+
+sparse_matrix_soph_2024$drafted = 0
+
+dsoph2024 <- xgb.DMatrix(as.matrix(sparse_matrix_soph_2024[, -which(names(sparse_matrix_soph_2024) == "drafted")]), label = sparse_matrix_soph_2024$drafted)
+
+#UPPERCLASSMEN
+
+categorical_cols <- sapply(bart_upperclass_2024, is.factor)
+if (any(categorical_cols)) {
+  dummies <- dummyVars(" ~ .", data = bart_upperclass_2024[, categorical_cols])
+  sparse_matrix_upperclass_2024 <- cbind(bart_upperclass_2024[, !categorical_cols, drop = FALSE], predict(dummies, newdata = bart_upperclass_2024))
+}
+
+
+sparse_matrix_upperclass_2024$drafted = 0
+
+dupperclass2024 <- xgb.DMatrix(as.matrix(sparse_matrix_upperclass_2024[, -which(names(sparse_matrix_upperclass_2024) == "drafted")]), label = sparse_matrix_upperclass_2024$drafted)
+
+githubURL_range <- "https://raw.githubusercontent.com/nkal22/combine_score/main/ncaa_molinar_range_XGB.RData"
+
+suppressWarnings({
+  download.file(githubURL_range, "localfile.RData")
+  load(url(githubURL_range))
+})
+
+# FRESHMEN PREDICTIONS
+githubURL_frosh <- "https://raw.githubusercontent.com/nkal22/combine_score/main/ncaa_molinar_frosh_XGB.RData"
+
+suppressWarnings({
+  download.file(githubURL_frosh, "localfile.RData")
+  load(url(githubURL_frosh))
+})
+frosh_predictions_ncaa <- predict(xgb_model_frosh, dfrosh2024)
+
+frosh_predictions_range <- predict(xgb_model_range, dfrosh2024)
+
+
+bart_frosh_2024$predicted = frosh_predictions_ncaa
+bart_frosh_2024$range = frosh_predictions_range
+bart_frosh_2024$player_name = frosh_player_names
+
+bart_frosh_2024 <- bart_frosh_2024[, c("player_name", setdiff(names(bart_frosh_2024), "player_name"))]
+bart_frosh$predicted = abs(frosh_predictions_ncaa * 100)
+bart_frosh$range = frosh_predictions_range
+
+# SOPHOMORE PREDICTIONS
+
+githubURL_soph <- "https://raw.githubusercontent.com/nkal22/combine_score/main/ncaa_molinar_soph_XGB.RData"
+
+suppressWarnings({
+  download.file(githubURL_soph, "localfile.RData")
+  load(url(githubURL_soph))
+})
+soph_predictions_ncaa <- predict(xgb_model_soph, dsoph2024)
+soph_predictions_range <- predict(xgb_model_range, dsoph2024)
+
+
+bart_soph_2024$predicted = soph_predictions_ncaa
+bart_soph_2024$range = soph_predictions_range
+bart_soph_2024$player_name = soph_player_names
+
+bart_soph_2024 <- bart_soph_2024[, c("player_name", setdiff(names(bart_soph_2024), "player_name"))]
+bart_soph$predicted = abs(soph_predictions_ncaa * 100)
+bart_soph$range = soph_predictions_range
+
+# UPPERCLASSMAN PREDICTIONS
+
+githubURL_upperclass <- "https://raw.githubusercontent.com/nkal22/combine_score/main/ncaa_molinar_upperclass_XGB.RData"
+
+suppressWarnings({
+  download.file(githubURL_upperclass, "localfile.RData")
+  load(url(githubURL_upperclass))
+})
+upperclass_predictions_ncaa <- predict(xgb_model_upperclass, dupperclass2024)
+upperclass_predictions_range <- predict(xgb_model_range, dupperclass2024)
+
+bart_upperclass_2024$predicted = upperclass_predictions_ncaa
+bart_upperclass_2024$range = upperclass_predictions_range
+bart_upperclass_2024$player_name = upperclass_player_names
+
+bart_upperclass_2024 <- bart_upperclass_2024[, c("player_name", setdiff(names(bart_upperclass_2024), "player_name"))]
+bart_upperclass$predicted = abs(upperclass_predictions_ncaa * 100)
+bart_upperclass$range = upperclass_predictions_range
+
+
+bart_subset <- rbind(bart_frosh, bart_soph, bart_upperclass)
+
+lookup_table <- read.csv('https://raw.githubusercontent.com/nkal22/combine_score/main/range_lookup_table.csv')
+
+drops = c("X")
+
+lookup_table <- lookup_table[ , !(names(lookup_table) %in% drops)]
+
+
+bart_subset <- merge(bart_subset, lookup_table, 
+                                by.x = "range", by.y = "numeric_value", 
+                                all.x = TRUE)
+
+bart_subset <- bart_subset %>%
+  mutate(category = if_else(predicted < 50, "UDFA", category))
+
+college_pbp <- read.csv('https://raw.githubusercontent.com/nkal22/combine_score/main/college_pbp_data_subset.csv')
+
+intl_players$predicted[intl_players$predicted > 100] <- 99.99
+bart_subset$predicted[bart_subset$predicted > 100] <- 99.99
+
+```
+
+# The Model
+
+The model allows you to input the name of any player from the 2024 season, view their statistics from the dataset, and output the percentage that the model determines is their probability of being drafted.
+
+```{r warning = FALSE, message = FALSE, echo = FALSE}
+
+server <- function(input,output){
+  options(warn = -1)
+  options(shiny.suppressErrors = TRUE)
+  
+  df_subset <- reactive({
+    a <- subset(bart_subset, player_name == input$Player)
+    return(a)
+  })
+  percentile_df_subset <- reactive({
+    e <- subset(final_df, player_name == input$Player)
+    return(e)
+  })
+  
+  plot_subset <- reactive({
+    c <- subset(college_pbp, shooter == input$Player)
+    return(c)
+  })
+  
+  international_df_subset <- reactive({
+    b <- subset(withdrawal_data, Player == input$international_player)
+    return(b)
+  })
+  
+  result_withdrawal_subset <- reactive({
+    f <- subset(intl_players, Player == input$international_player)
+    return(f)
+  })
+  
+  #similarity_score <- reactive({
+   # a <- subset(similarity_2022, player_name == input$Player)
+  #  e <- which.min(dist(rbind(a,drafted_subset))[1:nrow(drafted_subset)])
+  #  most_similar_player <- drafted_subset[e, ]
+  #  return(most_similar_player)
+  #})
+  
+  v <- reactive({
+    answer = vector()
+    for (i in 1:nrow(df_subset())){
+      college_answer <- paste("Model percent chance of being drafted:", round(df_subset()$predicted[i], 3), "%", sep= "\n")
+    }
+    
+    return(college_answer)
+  })
+
+  h <- reactive({
+    answer = vector()
+    for (i in 1:nrow(df_subset())){
+      draft_range <- paste("Model Projected Draft Range: ", df_subset()$category[i], sep= "\n")
+    }
+    
+    return(draft_range)
+  })
+  
+  w <- reactive({
+    international_answer = vector()
+    for (i in 1:nrow(result_withdrawal_subset())){
+      international_answer <- paste("Percent chance of being drafted:", round(result_withdrawal_subset()$predicted[i], 3), "%", sep= "\n")
+    }
+    
+    return(international_answer)
+    
+    
+  })
+  
+  calculate_attribute_scores <- function(player_data) {
+    if (nrow(player_data) == 0) {
+      return(NULL)  # Player not found
+    }
+    
+    # Calculate scores
+    
+  max_make_percentage <- 100  # Assuming percentages are out of 100
+  max_attempts <- max(final_df$totalrimshots_percentile, na.rm = TRUE)  # Maximum attempts from the dataset
+  
+  # Calculate the raw score
+  raw_score <- player_data$rim_make_percent_percentile * log(player_data$totalrimshots_percentile + 1)
+  
+  # Normalize to a 0 to 100 scale
+  scaled_score <- (raw_score / (max_make_percentage * log(max_attempts + 1))) * 100
+  
+  # Round the final score
+  inside_scoring_grade <- round(scaled_score, 1)
+    
+  max_mid_make_percentage <- 100  # Assuming percentages are out of 100
+  max_mid_attempts <- max(final_df$totalmidshots_percentile, na.rm = TRUE)  # Maximum mid attempts
+  max_tp_attempts <- max(final_df$TPA_percentile, na.rm = TRUE)  # Maximum three-point attempts
+  
+  # Calculate raw scores for mid-range and three-point shooting
+  raw_mid_score <- player_data$mid_make_percent_percentile * log(player_data$totalmidshots_percentile + 1)
+  raw_tp_score <- player_data$TP_per_percentile * log(player_data$TPA_percentile + 1)
+  
+  # Combine raw scores
+  combined_raw_score <- raw_mid_score + raw_tp_score
+  
+  # Normalize to a 0 to 100 scale
+  max_combined_score <- max_mid_make_percentage * (log(max_mid_attempts + 1) + log(max_tp_attempts + 1))
+  scaled_jumpshooting_grade <- (combined_raw_score / max_combined_score) * 100
+  
+  # Round the final score
+  jumpshooting_grade <- round(scaled_jumpshooting_grade, 1)
+    
+    playmaking_grade <- (player_data$AST_per_percentile + player_data$ast_tov_percentile) / 2
+    
+    rebounding_grade <- (player_data$ORB_per_percentile + player_data$DRB_per_percentile) / 2
+    
+    defense_grade <- (
+      player_data$stl_per_percentile + player_data$blk_per_percentile +
+      player_data$dbpm_percentile + player_data$dgbpm_percentile + 
+      player_data$dporpag_percentile + player_data$adrtg_percentile
+    ) / 6
+    
+    advanced_metrics_grade <- (
+      player_data$bpm_percentile + player_data$gbpm_percentile + 
+      player_data$porpag_percentile
+    ) / 3
+    
+    player_name = player_data$player_name
+    
+    position = player_data$position
+    
+    # Create a dataframe to return the attribute scores
+  attribute_scores <- data.frame(
+    player_name = player_name,
+    position = position,
+    inside_scoring_grade = round(inside_scoring_grade, 1),
+    jumpshooting_grade = round(jumpshooting_grade, 1),
+    playmaking_grade = round(playmaking_grade, 1),
+    rebounding_grade = round(rebounding_grade, 1),
+    defense_grade = round(defense_grade, 1),
+    advanced_metrics_grade = round(advanced_metrics_grade, 1)
+  )
+      
+    return(attribute_scores)
+  }
+  
+  
+  attribute_df_subset <- reactive({
+    g <- subset(calculate_attribute_scores(final_df), player_name == input$Player)
+    return(g)
+  })
+  
+  categorize_prospect_score <- function(attribute_df_subset) {
+    # Calculate the average score of numerical columns
+    numeric_columns <- sapply(attribute_df_subset, is.numeric)
+    average_score <- rowMeans(attribute_df_subset[, numeric_columns], na.rm = TRUE)
+    
+    # Categorize the score
+    if (average_score < 40) {
+      return("Prospect Statistical Profile is: Poor")
+    } else if (average_score < 60) {
+      return("Prospect Statistical Profile is: Below Average")
+    } else if (average_score < 72.5) {
+      return("Prospect Statistical Profile is: Average")
+    } else if (average_score < 85) {
+      return("Prospect Statistical Profile is: Above Average")
+    } else {
+      return("Prospect Statistical Profile is: Excellent")
+    }
+  }
+  
+  # q <- reactive({
+  #   heatmap_player = vector()
+  #   for (i in 1:nrow(plot_subset())){
+  #     heatmap_player <- paste("Shot Heatmap For:", plot_subset()$shooter[i], sep= "\n")
+  #   }
+  #   
+  #   return(heatmap_player)
+  #   
+  #   
+  # })
+  
+  # Add a compressed semicircle centered at (25, 0) with radius 25
+# center_x <- 25
+# center_y <- 0
+# y_radius <- 25
+# x_radius <- 20  # Compressed x-radius
+# 
+# # Create theta values for the semicircle
+# theta <- seq(0, pi, length.out = 100)
+# 
+# # Calculate x and y coordinates of the compressed semicircle
+# x_circle <- center_x + x_radius * cos(theta)
+# y_circle <- center_y + y_radius * sin(theta) + 3
+# 
+# # Data frame for semicircle coordinates
+# circle_data <- data.frame(x = x_circle, y = y_circle)
+    
+  
+  
+  output$table1 <- renderTable(df_subset())
+  output$b <- renderUI({
+    tags$h4(v(), style = "font-size: 20px;")  # Use h1 for header styling
+  })
+  output$range <- renderUI({
+    tags$h4(h(), style = "font-size: 20px;")  # Use h1 for header styling
+  })
+  output$statsText <- renderUI({
+    tags$h3("Statistical Profile Breakdown", style = "font-size: 24px;")  # Use h1 for header styling
+  })
+  output$gradesText <- renderUI({
+    tags$h3("Subcategory Grades", style = "font-size: 24px;")  # Use h1 for header styling
+  })
+  output$prospectText <- renderUI({
+    tags$h3("Category Grades", style = "font-size: 24px;")  # Use h1 for header styling
+  })
+  output$percentilesTable <- renderDT({
+    req(input$Player)  # Ensure input is available
+    data_to_display <- percentile_df_subset()
+    
+    # Check if the data is valid
+    if (nrow(data_to_display) == 0) {
+      return(NULL)  # Or you can provide a message
+    }
+    
+    # Identify numeric columns (excluding player_name and position)
+    numeric_columns <- sapply(data_to_display, is.numeric)
+    percentile_columns <- names(data_to_display)[numeric_columns]
+    
+    # Check for numeric columns and stop if none found
+    if (length(percentile_columns) == 0) {
+      return(NULL)  # Or provide a message indicating no numeric columns
+    }
+    
+    # Create a datatable with colored cells based on percentiles
+    dt <- datatable(data_to_display, 
+                    options = list(pageLength = 5),
+                    rownames = FALSE)
+    cuts <- c(0, 20, 40, 60, 80, 100)
+    # Apply formatStyle for each numeric column
+    for (col in percentile_columns) {
+      dt <- dt %>% formatStyle(
+        col, 
+        backgroundColor = styleInterval(cuts, c("white", "darkred", "red", "orange", "lightgreen", "darkgreen", "white")),
+        color = styleInterval(cuts, c("white", "white", "white", "white", "white", "white", "white"))
+      )
+    }
+    
+    dt  # Return the final datatable
+  })
+  output$space <- renderText(paste(" "))
+  output$attributeScoresTable <- renderDT({
+    req(input$Player)  # Ensure input is available
+    
+    # Calculate the attribute scores for the selected player
+    scores <- attribute_df_subset()
+    
+    if (is.null(scores)) {
+      return(NULL)  # No scores to display
+    }
+    
+    numeric_columns <- sapply(scores, is.numeric)
+    percentile_columns <- names(scores)[numeric_columns]
+    
+    
+    dt <- datatable(scores, options = list(pageLength = 5), rownames = FALSE)
+    
+    cuts <- c(0, 20, 40, 60, 80, 100)
+    # Apply formatStyle for each numeric column
+    for (col in percentile_columns) {
+      dt <- dt %>% formatStyle(
+        col, 
+        backgroundColor = styleInterval(cuts, c("white", "darkred", "red", "orange", "lightgreen", "darkgreen", "white")),
+        color = styleInterval(cuts, c("white", "white", "white", "white", "white", "white", "white"))
+      )
+    }
+    
+    dt
+    
+  })
+  
+  output$finalScore <- renderUI({
+    score_category <- categorize_prospect_score(attribute_df_subset())
+    
+    # Set color based on the score category
+    color <- switch(score_category,
+                    "Prospect Statistical Profile is: Poor" = "darkred",
+                    "Prospect Statistical Profile is: Below Average" = "red",
+                    "Prospect Statistical Profile is: Average" = "orange",
+                    "Prospect Statistical Profile is: Above Average" = "green",
+                    "Prospect Statistical Profile is: Excellent" = "darkgreen")
+  
+    # Return the text in <h3> tags with the appropriate color
+    tags$h3(style = paste("color:", color, ";"), score_category)
+  })
+
+
+  #output$space2 <- renderText({q()})
+  #output$c <- renderText(paste("Most Similar Statistical Profile Based Off Used Metrics:"))
+  #output$table2 <- renderTable(similarity_score())
+  
+  # output$player_plot <- renderPlot({
+  #   ggplot(plot_subset(), aes(x = loc_x, y = loc_y)) +
+  #       geom_bin2d(binwidth = c(2, 2), aes(fill = ..count..)) +
+  #       scale_fill_gradient(name = "count in bin", low = "lightblue", high = "darkblue") +
+  #       theme_minimal() +
+  #       geom_hline(yintercept = 3, linetype = "dashed", color = "red", size = 1) +
+  #       xlim(-2, 52) + ylim(-2, 40) +  # Set x and y limits
+  #       theme(axis.line = element_blank(),
+  #             axis.text = element_blank(),
+  #             axis.title = element_blank(),
+  #             panel.grid = element_blank()) +
+  #       geom_path(data = circle_data, aes(x = x, y = y), color = "green", size = 1)
+  #     
+  #   })
+  
+  output$table3 <- renderTable(international_df_subset())
+    output$d <- renderUI({
+    tags$h4(w(), style = "font-size: 20px;")  # Use h1 for header styling
+  })
+  
+  
+  
+  
+}
+
+shinyApp(ui = ui, server = server)
+
+
+
+```
+
+# Future Modifications
+
+I hope to create several versions of this model, which account for the differences in statistical profiles of positions (Guard, Wing, Big, etc.). The given dataset was considerably incomplete in this regard, so I have not yet had the time to add this feature in this initial version of the model. 
+
+Likewise, I would also like to include some physical measureables besides height to see how they change model output. Unfortunately, many of the data points that I would hope to include, such as wingspan, are not made publicly available by many college teams, which might make this part of the project impossible.
+
+Finally, I believe that a scale for draft range could be a possibility for an updated version of this model. Since the training dataset does include the pick of every drafted player, I could further refine the prediction to include a range of where a player "should" be drafted based off their statistical profile.
+
+All that said, this model is still in its infancy, and I am excited to see how it progresses as I continue to explore its possibilities. Any input that can be provided to improve its quality would be greatly appreciated!
